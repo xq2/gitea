@@ -38,12 +38,15 @@ func Merge(pr *models.PullRequest, doer *models.User, baseGitRepo *git.Repositor
 		return fmt.Errorf("Unable to get git version: %v", err)
 	}
 
-	if err = pr.GetHeadRepo(); err != nil {
-		log.Error("GetHeadRepo: %v", err)
+	if err = pr.LoadBaseRepo(); err != nil {
+		log.Error("LoadBaseRepo: %v", err)
+		return fmt.Errorf("LoadBaseRepo: %v", err)
+	} else if err = pr.LoadHeadRepo(); err != nil {
+		log.Error("LoadHeadRepo: %v", err)
 		return fmt.Errorf("GetHeadRepo: %v", err)
-	} else if err = pr.GetBaseRepo(); err != nil {
-		log.Error("GetBaseRepo: %v", err)
-		return fmt.Errorf("GetBaseRepo: %v", err)
+	}
+	if pr.HeadRepo == nil {
+		return models.ErrHeadRepoMissed{pr.ID, pr.HeadRepoID}
 	}
 
 	prUnit, err := pr.BaseRepo.GetUnit(models.UnitTypePullRequests)

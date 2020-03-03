@@ -95,6 +95,9 @@ func GetPullRequestCommitStatusState(pr *models.PullRequest) (structs.CommitStat
 	if err := pr.LoadHeadRepo(); err != nil {
 		return "", errors.Wrap(err, "LoadHeadRepo")
 	}
+	if pr.HeadRepo == nil {
+		return "", models.ErrHeadRepoMissed{pr.ID, pr.HeadRepoID}
+	}
 
 	// check if all required status checks are successful
 	headGitRepo, err := git.OpenRepository(pr.HeadRepo.RepoPath())

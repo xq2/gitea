@@ -93,14 +93,6 @@ func ListPullRequests(ctx *context.APIContext, form api.ListPullRequestsOptions)
 			ctx.Error(http.StatusInternalServerError, "LoadAttributes", err)
 			return
 		}
-		if err = prs[i].GetBaseRepo(); err != nil {
-			ctx.Error(http.StatusInternalServerError, "GetBaseRepo", err)
-			return
-		}
-		if err = prs[i].GetHeadRepo(); err != nil {
-			ctx.Error(http.StatusInternalServerError, "GetHeadRepo", err)
-			return
-		}
 		apiPrs[i] = prs[i].APIFormat()
 	}
 
@@ -146,14 +138,6 @@ func GetPullRequest(ctx *context.APIContext) {
 		return
 	}
 
-	if err = pr.GetBaseRepo(); err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetBaseRepo", err)
-		return
-	}
-	if err = pr.GetHeadRepo(); err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetHeadRepo", err)
-		return
-	}
 	ctx.JSON(http.StatusOK, pr.APIFormat())
 }
 
@@ -569,8 +553,12 @@ func MergePullRequest(ctx *context.APIContext, form auth.MergePullRequestForm) {
 		return
 	}
 
-	if err = pr.GetHeadRepo(); err != nil {
-		ctx.ServerError("GetHeadRepo", err)
+	if err = pr.LoadHeadRepo(); err != nil {
+		ctx.ServerError("LoadHeadRepo", err)
+		return
+	}
+	if pr.HeadRepo == nil {
+		ctx.ServerError("LoadHeadRepo", models.ErrHeadRepoMissed{pr.HeadRepoID, pr.ID})
 		return
 	}
 

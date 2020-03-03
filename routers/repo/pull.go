@@ -271,8 +271,8 @@ func checkPullInfo(ctx *context.Context) *models.Issue {
 		return nil
 	}
 
-	if err = issue.PullRequest.GetHeadRepo(); err != nil {
-		ctx.ServerError("GetHeadRepo", err)
+	if err = issue.PullRequest.LoadHeadRepo(); err != nil {
+		ctx.ServerError("LoadHeadRepo", err)
 		return nil
 	}
 
@@ -330,13 +330,13 @@ func PrepareViewPullInfo(ctx *context.Context, issue *models.Issue) *git.Compare
 	repo := ctx.Repo.Repository
 	pull := issue.PullRequest
 
-	if err := pull.GetHeadRepo(); err != nil {
-		ctx.ServerError("GetHeadRepo", err)
+	if err := pull.LoadHeadRepo(); err != nil {
+		ctx.ServerError("LoadHeadRepo", err)
 		return nil
 	}
 
-	if err := pull.GetBaseRepo(); err != nil {
-		ctx.ServerError("GetBaseRepo", err)
+	if err := pull.LoadBaseRepo(); err != nil {
+		ctx.ServerError("LoadBaseRepo", err)
 		return nil
 	}
 
@@ -358,14 +358,17 @@ func PrepareViewPullInfo(ctx *context.Context, issue *models.Issue) *git.Compare
 	var headBranchSha string
 	// HeadRepo may be missing
 	if pull.HeadRepo != nil {
-		var err error
-
-		headGitRepo, err := git.OpenRepository(pull.HeadRepo.RepoPath())
-		if err != nil {
-			ctx.ServerError("OpenRepository", err)
-			return nil
+		var headGitRepo *git.Repository
+		if pull.BaseRepoID == pull.HeadRepoID {
+			headGitRepo = baseGitRepo
+		} else {
+			headGitRepo, err = git.OpenRepository(pull.HeadRepo.RepoPath())
+			if err != nil {
+				ctx.ServerError("OpenRepository", err)
+				return nil
+			}
+			defer headGitRepo.Close()
 		}
-		defer headGitRepo.Close()
 
 		headBranchExist = headGitRepo.IsBranchExist(pull.HeadBranch)
 
@@ -864,15 +867,15 @@ func CleanUpPullRequest(ctx *context.Context) {
 		return
 	}
 
-	if err := pr.GetHeadRepo(); err != nil {
-		ctx.ServerError("GetHeadRepo", err)
+	if err := pr.LoadHeadRepo(); err != nil {
+		ctx.ServerError("LoadHeadRepo", err)
 		return
 	} else if pr.HeadRepo == nil {
 		// Forked repository has already been deleted
 		ctx.NotFound("CleanUpPullRequest", nil)
 		return
-	} else if err = pr.GetBaseRepo(); err != nil {
-		ctx.ServerError("GetBaseRepo", err)
+	} else if err = pr.LoadBaseRepo(); err != nil {
+		ctx.ServerError("LoadBaseRepo", err)
 		return
 	} else if err = pr.HeadRepo.GetOwner(); err != nil {
 		ctx.ServerError("HeadRepo.GetOwner", err)
@@ -891,19 +894,24 @@ func CleanUpPullRequest(ctx *context.Context) {
 
 	fullBranchName := pr.HeadRepo.Owner.Name + "/" + pr.HeadBranch
 
-	gitRepo, err := git.OpenRepository(pr.HeadRepo.RepoPath())
-	if err != nil {
-		ctx.ServerError(fmt.Sprintf("OpenRepository[%s]", pr.HeadRepo.RepoPath()), err)
-		return
-	}
-	defer gitRepo.Close()
-
 	gitBaseRepo, err := git.OpenRepository(pr.BaseRepo.RepoPath())
 	if err != nil {
 		ctx.ServerError(fmt.Sprintf("OpenRepository[%s]", pr.BaseRepo.RepoPath()), err)
 		return
 	}
 	defer gitBaseRepo.Close()
+
+	var gitRepo *git.Repository
+	if pr.HeadRepoID == pr.BaseRepoID {
+		gitRepo = gitBaseRepo
+	} else {
+		gitRepo, err := git.OpenRepository(pr.HeadRepo.RepoPath())
+		if err != nil {
+			ctx.ServerError(fmt.Sprintf("OpenRepository[%s]", pr.HeadRepo.RepoPath()), err)
+			return
+		}
+		defer gitRepo.Close()
+	}
 
 	defer func() {
 		ctx.JSON(200, map[string]interface{}{

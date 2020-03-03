@@ -912,8 +912,8 @@ func ViewIssue(ctx *context.Context) {
 		canDelete := false
 
 		if ctx.IsSigned {
-			if err := pull.GetHeadRepo(); err != nil {
-				log.Error("GetHeadRepo: %v", err)
+			if err := pull.LoadHeadRepo(); err != nil {
+				log.Error("LoadHeadRepo: %v", err)
 			} else if pull.HeadRepo != nil && pull.HeadBranch != pull.HeadRepo.DefaultBranch {
 				perm, err := models.GetUserRepoPermission(pull.HeadRepo, ctx.User)
 				if err != nil {

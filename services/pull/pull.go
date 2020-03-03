@@ -235,8 +235,11 @@ func PushToBaseRepo(pr *models.PullRequest) (err error) {
 		log.Error("Unable to load head repository for PR[%d] Error: %v", pr.ID, err)
 		return err
 	}
-	headRepoPath := pr.HeadRepo.RepoPath()
+	if pr.HeadRepo == nil {
+		return models.ErrHeadRepoMissed{pr.ID, pr.HeadRepoID}
+	}
 
+	headRepoPath := pr.HeadRepo.RepoPath()
 	if err := git.Clone(headRepoPath, tmpBasePath, git.CloneRepoOptions{
 		Bare:   true,
 		Shared: true,

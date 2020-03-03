@@ -17,6 +17,23 @@ import (
 	"code.gitea.io/gitea/modules/timeutil"
 )
 
+// ErrHeadRepoMissed represents an error to report pull's head repository missed
+type ErrHeadRepoMissed struct {
+	PullID     int64
+	HeadRepoID int64
+}
+
+// Error implements the interface
+func (err ErrHeadRepoMissed) Error() string {
+	return fmt.Sprintf("Head repository [%d] of pull id [%d] missed", err.HeadRepoID, err.PullID)
+}
+
+// IsErrHeadRepoMissed returns true if head repository missed
+func IsErrHeadRepoMissed(err error) bool {
+	_, ok := err.(ErrHeadRepoMissed)
+	return ok
+}
+
 // PullRequestType defines pull request type
 type PullRequestType int
 
@@ -63,6 +80,8 @@ type PullRequest struct {
 	MergerID       int64              `xorm:"INDEX"`
 	Merger         *User              `xorm:"-"`
 	MergedUnix     timeutil.TimeStamp `xorm:"updated INDEX"`
+
+	isHeadRepoLoaded bool `xorm:"-"`
 }
 
 // MustHeadUserName returns the HeadRepo's username if failed return blank
@@ -73,6 +92,9 @@ func (pr *PullRequest) MustHeadUserName() string {
 		} else {
 			log.Warn("LoadHeadRepo %d but repository does not exist: %v", pr.HeadRepoID, err)
 		}
+		return ""
+	}
+	if pr.HeadRepo == nil {
 		return ""
 	}
 	return pr.HeadRepo.MustOwnerName()
@@ -98,38 +120,57 @@ func (pr *PullRequest) LoadAttributes() error {
 	return pr.loadAttributes(x)
 }
 
-// LoadBaseRepo loads pull request base repository from database
-func (pr *PullRequest) LoadBaseRepo() error {
-	if pr.BaseRepo == nil {
-		if pr.HeadRepoID == pr.BaseRepoID && pr.HeadRepo != nil {
-			pr.BaseRepo = pr.HeadRepo
-			return nil
+func (pr *PullRequest) loadHeadRepo(e Engine) error {
+	if !pr.isHeadRepoLoaded && pr.HeadRepo == nil && pr.HeadRepoID > 0 {
+		if pr.HeadRepoID == pr.BaseRepoID {
+			if pr.BaseRepo != nil {
+				pr.HeadRepo = pr.BaseRepo
+				return nil
+			} else if pr.Issue != nil && pr.Issue.Repo != nil {
+				pr.HeadRepo = pr.Issue.Repo
+				return nil
+			}
 		}
-		var repo Repository
-		if has, err := x.ID(pr.BaseRepoID).Get(&repo); err != nil {
-			return err
-		} else if !has {
-			return ErrRepoNotExist{ID: pr.BaseRepoID}
+
+		var err error
+		pr.HeadRepo, err = getRepositoryByID(e, pr.HeadRepoID)
+		if err != nil && !IsErrRepoNotExist(err) { // Head repo maybe deleted, but it should still work
+			return fmt.Errorf("getRepositoryByID(head): %v", err)
+
 		}
-		pr.BaseRepo = &repo
+		pr.isHeadRepoLoaded = true
 	}
 	return nil
 }
 
-// LoadHeadRepo loads pull request head repository from database
+// LoadHeadRepo loads the head repository
 func (pr *PullRequest) LoadHeadRepo() error {
-	if pr.HeadRepo == nil {
-		if pr.HeadRepoID == pr.BaseRepoID && pr.BaseRepo != nil {
-			pr.HeadRepo = pr.BaseRepo
-			return nil
-		}
-		var repo Repository
-		if has, err := x.ID(pr.HeadRepoID).Get(&repo); err != nil {
-			return err
-		} else if !has {
-			return ErrRepoNotExist{ID: pr.HeadRepoID}
-		}
-		pr.HeadRepo = &repo
+	return pr.loadHeadRepo(x)
+}
+
+// LoadBaseRepo loads the target repository
+func (pr *PullRequest) LoadBaseRepo() error {
+	return pr.loadBaseRepo(x)
+}
+
+func (pr *PullRequest) loadBaseRepo(e Engine) (err error) {
+	if pr.BaseRepo != nil {
+		return nil
+	}
+
+	if pr.HeadRepoID == pr.BaseRepoID && pr.HeadRepo != nil {
+		pr.BaseRepo = pr.HeadRepo
+		return nil
+	}
+
+	if pr.Issue != nil && pr.Issue.Repo != nil {
+		pr.BaseRepo = pr.Issue.Repo
+		return nil
+	}
+
+	pr.BaseRepo, err = getRepositoryByID(e, pr.BaseRepoID)
+	if err != nil {
+		return fmt.Errorf("GetRepositoryByID(base): %v", err)
 	}
 	return nil
 }
@@ -425,7 +466,6 @@ func (pr *PullRequest) apiFormat(e Engine) *api.PullRequest {
 		baseBranch *git.Branch
 		headBranch *git.Branch
 		baseCommit *git.Commit
-		headCommit *git.Commit
 		err        error
 	)
 	if err = pr.Issue.loadRepo(e); err != nil {
@@ -433,19 +473,14 @@ func (pr *PullRequest) apiFormat(e Engine) *api.PullRequest {
 		return nil
 	}
 	apiIssue := pr.Issue.apiFormat(e)
-	if pr.BaseRepo == nil {
-		pr.BaseRepo, err = getRepositoryByID(e, pr.BaseRepoID)
-		if err != nil {
-			log.Error("GetRepositoryById[%d]: %v", pr.ID, err)
-			return nil
-		}
+	if err := pr.loadBaseRepo(e); err != nil {
+		log.Error("loadBaseRepo[%d]: %v", pr.ID, err)
+		return nil
 	}
-	if pr.HeadRepoID != 0 && pr.HeadRepo == nil {
-		pr.HeadRepo, err = getRepositoryByID(e, pr.HeadRepoID)
-		if err != nil && !IsErrRepoNotExist(err) {
-			log.Error("GetRepositoryById[%d]: %v", pr.ID, err)
-			return nil
-		}
+
+	if err := pr.loadHeadRepo(e); err != nil {
+		log.Error("loadHeadRepo[%d]: %v", pr.ID, err)
+		return nil
 	}
 
 	apiPullRequest := &api.PullRequest{
@@ -469,71 +504,17 @@ func (pr *PullRequest) apiFormat(e Engine) *api.PullRequest {
 		Deadline:  apiIssue.Deadline,
 		Created:   pr.Issue.CreatedUnix.AsTimePtr(),
 		Updated:   pr.Issue.UpdatedUnix.AsTimePtr(),
-	}
-	baseBranch, err = pr.BaseRepo.GetBranch(pr.BaseBranch)
-	if err != nil {
-		if git.IsErrBranchNotExist(err) {
-			apiPullRequest.Base = nil
-		} else {
-			log.Error("GetBranch[%s]: %v", pr.BaseBranch, err)
-			return nil
-		}
-	} else {
-		apiBaseBranchInfo := &api.PRBranchInfo{
+		Base: &api.PRBranchInfo{
 			Name:       pr.BaseBranch,
 			Ref:        pr.BaseBranch,
 			RepoID:     pr.BaseRepoID,
 			Repository: pr.BaseRepo.innerAPIFormat(e, AccessModeNone, false),
-		}
-		baseCommit, err = baseBranch.GetCommit()
-		if err != nil {
-			if git.IsErrNotExist(err) {
-				apiBaseBranchInfo.Sha = ""
-			} else {
-				log.Error("GetCommit[%s]: %v", baseBranch.Name, err)
-				return nil
-			}
-		} else {
-			apiBaseBranchInfo.Sha = baseCommit.ID.String()
-		}
-		apiPullRequest.Base = apiBaseBranchInfo
-	}
-
-	if pr.HeadRepo != nil {
-		headBranch, err = pr.HeadRepo.GetBranch(pr.HeadBranch)
-		if err != nil {
-			if git.IsErrBranchNotExist(err) {
-				apiPullRequest.Head = nil
-			} else {
-				log.Error("GetBranch[%s]: %v", pr.HeadBranch, err)
-				return nil
-			}
-		} else {
-			apiHeadBranchInfo := &api.PRBranchInfo{
-				Name:       pr.HeadBranch,
-				Ref:        pr.HeadBranch,
-				RepoID:     pr.HeadRepoID,
-				Repository: pr.HeadRepo.innerAPIFormat(e, AccessModeNone, false),
-			}
-			headCommit, err = headBranch.GetCommit()
-			if err != nil {
-				if git.IsErrNotExist(err) {
-					apiHeadBranchInfo.Sha = ""
-				} else {
-					log.Error("GetCommit[%s]: %v", headBranch.Name, err)
-					return nil
-				}
-			} else {
-				apiHeadBranchInfo.Sha = headCommit.ID.String()
-			}
-			apiPullRequest.Head = apiHeadBranchInfo
-		}
-	} else {
-		apiPullRequest.Head = &api.PRBranchInfo{
+		},
+		Head: &api.PRBranchInfo{
 			Name:   pr.HeadBranch,
 			Ref:    fmt.Sprintf("refs/pull/%d/head", pr.Index),
 			RepoID: -1,
-		}
+		},
 	}
 
 	if pr.Status != PullRequestStatusChecking {
@@ -546,33 +527,78 @@ func (pr *PullRequest) apiFormat(e Engine) *api.PullRequest {
 		apiPullRequest.MergedBy = pr.Merger.APIFormat()
 	}
 
-	return apiPullRequest
-}
-
-func (pr *PullRequest) getHeadRepo(e Engine) (err error) {
-	pr.HeadRepo, err = getRepositoryByID(e, pr.HeadRepoID)
-	if err != nil && !IsErrRepoNotExist(err) {
-		return fmt.Errorf("getRepositoryByID(head): %v", err)
+	baseRepoPath := pr.BaseRepo.repoPath(e)
+	baseGitRepo, err := git.OpenRepository(baseRepoPath)
+	if err != nil {
+		log.Error("OpenRepository[%s]: %v", baseRepoPath, err)
+		return nil
 	}
-	return nil
-}
+	defer baseGitRepo.Close()
 
-// GetHeadRepo loads the head repository
-func (pr *PullRequest) GetHeadRepo() error {
-	return pr.getHeadRepo(x)
-}
-
-// GetBaseRepo loads the target repository
-func (pr *PullRequest) GetBaseRepo() (err error) {
-	if pr.BaseRepo != nil {
+	baseBranch, err = baseGitRepo.GetBranch(pr.BaseBranch)
+	if err != nil && !git.IsErrBranchNotExist(err) {
+		log.Error("GetBranch[%s]: %v", pr.BaseBranch, err)
 		return nil
 	}
 
-	pr.BaseRepo, err = GetRepositoryByID(pr.BaseRepoID)
-	if err != nil {
-		return fmt.Errorf("GetRepositoryByID(base): %v", err)
+	if err == nil {
+		baseCommit, err = baseBranch.GetCommit()
+		if err != nil && !git.IsErrNotExist(err) {
+			log.Error("GetCommit[%s]: %v", baseBranch.Name, err)
+			return nil
+		}
+
+		if err == nil {
+			apiPullRequest.Base.Sha = baseCommit.ID.String()
+		}
 	}
-	return nil
+
+	if pr.HeadRepo != nil {
+		apiPullRequest.Head.RepoID = pr.HeadRepo.ID
+		apiPullRequest.Head.Repository = pr.HeadRepo.innerAPIFormat(e, AccessModeNone, false)
+
+		var headGitRepo *git.Repository
+		if pr.HeadRepoID == pr.BaseRepoID {
+			headGitRepo = baseGitRepo
+		} else {
+			headRepoPath := pr.HeadRepo.repoPath(e)
+			headGitRepo, err = git.OpenRepository(headRepoPath)
+			if err != nil {
+				log.Error("OpenRepository[%s]: %v", headRepoPath, err)
+				return nil
+			}
+			defer headGitRepo.Close()
+		}
+
+		headBranch, err = headGitRepo.GetBranch(pr.HeadBranch)
+		if err != nil && !git.IsErrBranchNotExist(err) {
+			log.Error("GetBranch[%s]: %v", pr.HeadBranch, err)
+			return nil
+		}
+
+		if git.IsErrBranchNotExist(err) {
+			headCommitID, err := headGitRepo.GetRefCommitID(apiPullRequest.Head.Ref)
+			if err != nil && !git.IsErrNotExist(err) {
+				log.Error("GetCommit[%s]: %v", headBranch.Name, err)
+				return nil
+			}
+			if err == nil {
+				apiPullRequest.Head.Sha = headCommitID
+			}
+		} else {
+			commit, err := headBranch.GetCommit()
+			if err != nil && !git.IsErrNotExist(err) {
+				log.Error("GetCommit[%s]: %v", headBranch.Name, err)
+				return nil
+			}
+			if err == nil {
+				apiPullRequest.Head.Ref = pr.HeadBranch
+				apiPullRequest.Head.Sha = commit.ID.String()
+			}
+		}
+	}
+
+	return apiPullRequest
 }
 
 // IsChecking returns true if this pull request is still checking conflict.
@@ -587,7 +613,7 @@ func (pr *PullRequest) CanAutoMerge() bool {
 
 // GetLastCommitStatus returns the last commit status for this pull request.
 func (pr *PullRequest) GetLastCommitStatus() (status *CommitStatus, err error) {
-	if err = pr.GetHeadRepo(); err != nil {
+	if err = pr.LoadHeadRepo(); err != nil {
 		return nil, err
 	}
 
@@ -641,8 +667,8 @@ func (pr *PullRequest) CheckUserAllowedToMerge(doer *User) (err error) {
 	}
 
 	if pr.BaseRepo == nil {
-		if err = pr.GetBaseRepo(); err != nil {
-			return fmt.Errorf("GetBaseRepo: %v", err)
+		if err = pr.LoadBaseRepo(); err != nil {
+			return fmt.Errorf("LoadBaseRepo: %v", err)
 		}
 	}
 
@@ -921,7 +947,7 @@ func (pr *PullRequest) GetWorkInProgressPrefix() string {
 // IsHeadEqualWithBranch returns if the commits of branchName are available in pull request head
 func (pr *PullRequest) IsHeadEqualWithBranch(branchName string) (bool, error) {
 	var err error
-	if err = pr.GetBaseRepo(); err != nil {
+	if err = pr.LoadBaseRepo(); err != nil {
 		return false, err
 	}
 	baseGitRepo, err := git.OpenRepository(pr.BaseRepo.RepoPath())
@@ -933,8 +959,11 @@ func (pr *PullRequest) IsHeadEqualWithBranch(branchName string) (bool, error) {
 		return false, err
 	}
 
-	if err = pr.GetHeadRepo(); err != nil {
+	if err = pr.LoadHeadRepo(); err != nil {
 		return false, err
+	}
+	if pr.HeadRepo == nil {
+		return false, ErrHeadRepoMissed{pr.ID, pr.HeadRepoID}
 	}
 	headGitRepo, err := git.OpenRepository(pr.HeadRepo.RepoPath())
 	if err != nil {

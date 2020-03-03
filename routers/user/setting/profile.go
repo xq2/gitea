@@ -209,7 +209,7 @@ func Repos(ctx *context.Context) {
 		if repos[i].IsFork {
 			err := repos[i].GetBaseRepo()
 			if err != nil {
-				ctx.ServerError("GetBaseRepo", err)
+				ctx.ServerError("LoadBaseRepo", err)
 				return
 			}
 			err = repos[i].BaseRepo.GetOwner()

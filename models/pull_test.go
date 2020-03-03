@@ -7,6 +7,7 @@ package models
 import (
 	"testing"
 
+	"code.gitea.io/gitea/modules/structs"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -31,29 +32,36 @@ func TestPullRequest_LoadIssue(t *testing.T) {
 
 func TestPullRequest_APIFormat(t *testing.T) {
 	assert.NoError(t, PrepareTestDatabase())
+	headRepo := models.AssertExistsAndLoadBean(t, &models.Repository{ID: 1}).(*models.Repository)
 	pr := AssertExistsAndLoadBean(t, &PullRequest{ID: 1}).(*PullRequest)
 	assert.NoError(t, pr.LoadAttributes())
 	assert.NoError(t, pr.LoadIssue())
 	apiPullRequest := pr.APIFormat()
 	assert.NotNil(t, apiPullRequest)
-	assert.Nil(t, apiPullRequest.Head)
+	assert.EqualValues(t, &structs.PRBranchInfo{
+		Name:       "branch1",
+		Ref:        "refs/pull/2/head",
+		Sha:        "4a357436d925b5c974181ff12a994538ddc5a269",
+		RepoID:     1,
+		Repository: headRepo.APIFormat(models.AccessModeNone),
+	}, apiPullRequest.Head)
 }
 
-func TestPullRequest_GetBaseRepo(t *testing.T) {
+func TestPullRequest_LoadBaseRepo(t *testing.T) {
 	assert.NoError(t, PrepareTestDatabase())
 	pr := AssertExistsAndLoadBean(t, &PullRequest{ID: 1}).(*PullRequest)
-	assert.NoError(t, pr.GetBaseRepo())
+	assert.NoError(t, pr.LoadBaseRepo())
 	assert.NotNil(t, pr.BaseRepo)
 	assert.Equal(t, pr.BaseRepoID, pr.BaseRepo.ID)
-	assert.NoError(t, pr.GetBaseRepo())
+	assert.NoError(t, pr.LoadBaseRepo())
 	assert.NotNil(t, pr.BaseRepo)
 	assert.Equal(t, pr.BaseRepoID, pr.BaseRepo.ID)
 }
 
-func TestPullRequest_GetHeadRepo(t *testing.T) {
+func TestPullRequest_LoadHeadRepo(t *testing.T) {
 	assert.NoError(t, PrepareTestDatabase())
 	pr := AssertExistsAndLoadBean(t, &PullRequest{ID: 1}).(*PullRequest)
-	assert.NoError(t, pr.GetHeadRepo())
+	assert.NoError(t, pr.LoadHeadRepo())
 	assert.NotNil(t, pr.HeadRepo)
 	assert.Equal(t, pr.HeadRepoID, pr.HeadRepo.ID)
 }
